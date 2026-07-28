@@ -1,0 +1,9 @@
+*.env
+
+setup.py
+
+CONTEXT.MD 
+
+pyproject.toml 
+
+__pycache__/
