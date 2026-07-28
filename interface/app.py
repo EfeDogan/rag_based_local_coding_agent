@@ -402,32 +402,37 @@ if user_input := st.chat_input("Bir soru sorun veya dosya oluşturmasını istey
             st.markdown(user_input)
 
         with st.chat_message("assistant"):
-            with st.status("Yanıt üretiliyor...", expanded=True) as resp_status:
-                event_stream = agent_executor.stream(
-                    {"messages": [("human", user_input)]},
-                    config={**config, "callbacks": [token_tracker]},
-                    stream_mode="values"
-                )
+                # Tüm agent çalışma sürecini tek ve şık bir status kutusu içine alıyoruz
+                with st.status("🤖 Agent düşünüyor ve çalışıyor...", expanded=True) as resp_status:
+                    event_stream = agent_executor.stream(
+                        {"messages": [("human", user_input)]},
+                        config={**config, "callbacks": [token_tracker]},
+                        stream_mode="values"
+                    )
 
-                for event in event_stream:
-                    latest_msg = event["messages"][-1]
+                    for event in event_stream:
+                        latest_msg = event["messages"][-1]
 
-                    if isinstance(latest_msg, AIMessage) and latest_msg.tool_calls:
-                        for tool_call in latest_msg.tool_calls:
-                            st.write(f"⚙️ Tool Çağrılıyor: `{tool_call['name']}`")
-                            st.json(tool_call['args'])
+                        # Tool çağrılırken veya yanıt alınırken ekrana açık yazı yazdırmak yerine
+                        # status metnini güncelleyebiliriz veya tamamen arka planda tutabiliriz.
+                        if isinstance(latest_msg, AIMessage) and latest_msg.tool_calls:
+                            for tool_call in latest_msg.tool_calls:
+                                resp_status.update(label=f"⚙️ Tool Çalıştırılıyor: `{tool_call['name']}`", state="running")
+                        
+                        elif isinstance(latest_msg, ToolMessage):
+                            resp_status.update(label=f"📄 Tool Yanıtı Alındı: `{latest_msg.name}`", state="running")
+
+                        elif isinstance(latest_msg, AIMessage) and latest_msg.content:
+                            # Nihai metin üretildiğinde akışa bırakıyoruz
+                            pass
                     
-                    elif isinstance(latest_msg, ToolMessage):
-                        st.write(f"📄 Tool Yanıtı Alındı ({latest_msg.name})")
-                        st.text(str(latest_msg.content))
+                    resp_status.update(label="Yanıt tamamlandı.", state="complete", expanded=False)
 
-                    elif isinstance(latest_msg, AIMessage) and latest_msg.content:
-                        st.markdown(latest_msg.content)
-                
-                resp_status.update(label="Yanıt tamamlandı.", state="complete", expanded=False)
-
-        latest_state = agent_executor.get_state(config)
-        latest_messages = latest_state.values.get("messages", [])
+                # Döngü bittikten sonra en son asistan mesajını ekrana basıyoruz
+                latest_state = agent_executor.get_state(config)
+                latest_messages = latest_state.values.get("messages", [])
+                if latest_messages and isinstance(latest_messages[-1], AIMessage) and latest_messages[-1].content:
+                    st.markdown(latest_messages[-1].content)
 
         if token_tracker.prompt_eval_count >= 500000:
             memory_text = "".join([f"[{i}] {m.__class__.__name__}: {m.content}\n" for i, m in enumerate(latest_messages)])
