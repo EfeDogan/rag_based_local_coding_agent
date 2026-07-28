@@ -1,6 +1,7 @@
 import os 
 import sys 
 import shutil 
+import json 
 import threading 
 from pathlib import Path 
 
@@ -12,7 +13,7 @@ if str(ROOT_DIR) not in sys.path:
 import glob 
 import requests 
 from uuid import uuid4 
-from typing import Any 
+from typing import Any, List 
 from dotenv import load_dotenv 
 
 import streamlit as st 
@@ -134,7 +135,7 @@ def init_agent():
 
 agent_executor, llm = init_agent() 
 
-# --- 4. YARDIMCI FONKSİYONLAR VE BAŞLIK YÖNETİMİ --- 
+# --- 4. YARDIMCI FONKSİYONLAR VE BAŞLIK/GEÇMİŞ YÖNETİMİ --- 
 
 def create_ornith(): 
     """Streamlit içinde konu başlığı belirlemek için bu modeli kullan""" 
@@ -191,6 +192,83 @@ def delete_session(session_id: str):
     if os.path.exists(folder_path): 
         shutil.rmtree(folder_path) 
 
+# --- MESAJLARI DİSKE KAYDETME VE YÜKLEME FONKSİYONLARI ---
+def save_messages_to_disk(session_id: str, messages: List[Any]):
+    """LangGraph mesaj nesnelerini session klasörüne history.json olarak kaydeder."""
+    folder_path = os.path.join(SESSION_PATH, str(session_id))
+    os.makedirs(folder_path, exist_ok=True)
+    history_file = os.path.join(folder_path, "history.json")
+    
+    serialized_messages = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            serialized_messages.append({"type": "human", "content": msg.content, "id": getattr(msg, "id", None)})
+        elif isinstance(msg, AIMessage):
+            serialized_messages.append({
+                "type": "ai", 
+                "content": msg.content, 
+                "id": getattr(msg, "id", None),
+                "tool_calls": getattr(msg, "tool_calls", [])
+            })
+        elif isinstance(msg, ToolMessage):
+            serialized_messages.append({
+                "type": "tool", 
+                "content": msg.content, 
+                "id": getattr(msg, "id", None),
+                "name": getattr(msg, "name", "tool"),
+                "tool_call_id": getattr(msg, "tool_call_id", None)  # <-- tool_call_id eklendi
+            })
+        elif isinstance(msg, SystemMessage):
+            serialized_messages.append({"type": "system", "content": msg.content, "id": getattr(msg, "id", None)})
+
+    try:
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(serialized_messages, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[ERROR] Geçmiş diske kaydedilemedi: {e}")
+
+def load_messages_from_disk(session_id: str, config: dict):
+    """Diskte kayıtlı history.json dosyasını okur hem LangGraph state'ine yükler hem nesne olarak döner."""
+    folder_path = os.path.join(SESSION_PATH, str(session_id))
+    history_file = os.path.join(folder_path, "history.json")
+    
+    if not os.path.exists(history_file):
+        return []
+        
+    try:
+        with open(history_file, "r", encoding="utf-8") as f:
+            serialized_messages = json.load(f)
+            
+        restored_messages = []
+        for item in serialized_messages:
+            m_type = item.get("type")
+            content = item.get("content", "")
+            m_id = item.get("id")
+            
+            if m_type == "human":
+                restored_messages.append(HumanMessage(content=content, id=m_id))
+            elif m_type == "ai":
+                tool_calls = item.get("tool_calls", [])
+                restored_messages.append(AIMessage(content=content, id=m_id, tool_calls=tool_calls))
+            elif m_type == "tool":
+                name = item.get("name", "tool")
+                tool_call_id = item.get("tool_call_id")  # <-- tool_call_id okunuyor
+                restored_messages.append(ToolMessage(content=content, id=m_id, name=name, tool_call_id=tool_call_id))
+            elif m_type == "system":
+                restored_messages.append(SystemMessage(content=content, id=m_id))
+                
+        if restored_messages:
+            # LangGraph hafızasını da doldur
+            current_state_msgs = agent_executor.get_state(config).values.get("messages", [])
+            if not current_state_msgs:
+                agent_executor.update_state(config, {"messages": restored_messages})
+                
+        return restored_messages
+    except Exception as e:
+        print(f"[ERROR] Geçmiş diskten yüklenemedi: {e}")
+        
+    return []
+
 def load_session_context(session_id: str, config: dict): 
     folder_path = os.path.join(SESSION_PATH, str(session_id)) 
     files = sorted(glob.glob(os.path.join(folder_path, "CONTEXT*.md"))) 
@@ -244,6 +322,10 @@ def run_compaction(memory_text: str, session_id: str, config: dict):
             agent_executor.update_state(config, {"messages": delete_actions}) 
 
     load_session_context(session_id, config) 
+    
+    latest_state = agent_executor.get_state(config)
+    save_messages_to_disk(session_id, latest_state.values.get("messages", []))
+    
     st.toast(f"Compaction çalıştırıldı! `CONTEXT{contextmd_count}.md` kaydedildi.", icon="🧹") 
 
 # --- 5. SOL SIDEBAR (OTURUM YÖNETİMİ) --- 
@@ -291,7 +373,7 @@ active_session_id = st.session_state["current_session_id"]
 config = {"configurable": {"thread_id": active_session_id}} 
 
 # --- 6. SAYFA DÜZENİ VE SABİT İKİ KOLON --- 
-file_ratio = 0.35  # Sağ panel sabit genişlik oranı (%35)
+file_ratio = 0.35  
 chat_ratio = 1.0 - file_ratio 
 col_chat, col_files = st.columns([chat_ratio, file_ratio], gap="large") 
 
@@ -300,16 +382,18 @@ with col_chat:
     st.title("🤖 Codebase RAG & Agent") 
     st.caption(f"Aktif Session ID: `{active_session_id}`") 
 
-    # State'teki mevcut geçmiş mesajları al 
+    # 1. Önce LangGraph state'ine bak, boşsa diskten (history.json) yükle
     current_state = agent_executor.get_state(config) 
     messages = current_state.values.get("messages", []) 
 
     if not messages: 
-        load_session_context(active_session_id, config) 
-        current_state = agent_executor.get_state(config) 
-        messages = current_state.values.get("messages", []) 
+        messages = load_messages_from_disk(active_session_id, config)
+        if not messages:
+            load_session_context(active_session_id, config) 
+            current_state = agent_executor.get_state(config) 
+            messages = current_state.values.get("messages", []) 
 
-    # Dahili Geçmişi Ekrana Bas 
+    # 2. Dahili Geçmişi Ekrana Bas (System mesajlarını filtreleyerek kullanıcı/asistan/tool akışını göster)
     for msg in messages: 
         if isinstance(msg, HumanMessage): 
             with st.chat_message("user"): 
@@ -329,7 +413,6 @@ with col_chat:
 # Girdi Kutusu Her Zaman En Altta Durur 
 if user_input := st.chat_input("Bir soru sorun veya dosya oluşturmasını isteyin..."): 
     if user_input.strip() == "/compact": 
-        # 1. Kullanıcının komutunu geçmişe ekle (görünür olsun) 
         human_msg = HumanMessage(content="/compact") 
         agent_executor.update_state(config, {"messages": [human_msg]}) 
 
@@ -338,41 +421,45 @@ if user_input := st.chat_input("Bir soru sorun veya dosya oluşturmasını istey
             latest_messages = latest_state.values.get("messages", []) 
             memory_text = "".join([f"[{i}] {m.__class__.__name__}: {m.content}\n" for i, m in enumerate(latest_messages)]) 
             
-            # Compaction çalıştır ve context dosyasını kaydet 
             run_compaction(memory_text=memory_text, session_id=active_session_id, config=config) 
             
-            # Kaçıncı context dosyasının oluşturulduğunu bulmak için klasörü kontrol et 
             folder_path = os.path.join(SESSION_PATH, str(active_session_id)) 
             files = sorted(glob.glob(os.path.join(folder_path, "CONTEXT*.md"))) 
             latest_context_file = os.path.basename(files[-1]) if files else "CONTEXT.md" 
 
             status.update(label=f"`{latest_context_file}` başarıyla oluşturuldu.", state="complete", expanded=False) 
 
-        # 2. Asistan yanıtı olarak başarı mesajını state'e ve arayüze ekle 
         success_content = f"🧹 **Compaction başarıyla tamamlandı!** Sohbet geçmişi özetlendi ve `{latest_context_file}` olarak diske kaydedildi."
         ai_msg = AIMessage(content=success_content) 
         agent_executor.update_state(config, {"messages": [ai_msg]}) 
+         
+        latest_state = agent_executor.get_state(config)
+        save_messages_to_disk(active_session_id, latest_state.values.get("messages", []))
          
         st.rerun()
          
     else: 
         token_tracker = TokenTrackerHandler() 
         
-        # title.txt kontrolü eklenerek güncellenen kısım:
+        # Başlık oluşturma mantığı (Eğer yoksa arka planda (thread ile) hızlıca oluşturulur)
         title_file_path = os.path.join(SESSION_PATH, str(active_session_id), "title.txt")
         if not os.path.exists(title_file_path): 
-            def background_title_generation(inp, session_id): 
-                try: 
-                    new_title = generate_session_title(inp) 
-                    save_session_title(session_id, f"💬 {new_title}") 
+            # İlk etapta geçici bir başlık atayalım ki arayüz hemen güncellenebilsin
+            save_session_title(active_session_id, f"💬 {user_input[:20]}...")
+            
+            # Gerçek başlığı arka planda (thread içinde) üretelim ki kullanıcıyı bekletmesin
+            def background_title_generation(sess_id, text):
+                try:
+                    new_title = generate_session_title(text) 
+                    save_session_title(sess_id, f"💬 {new_title}")
                 except Exception as e: 
-                    print(f"Başlık oluşturulamadı: {e}") 
+                    print(f"Arka planda başlık oluşturulamadı: {e}")
 
-            threading.Thread( 
-                target=background_title_generation,  
-                args=(user_input, active_session_id),  
-                daemon=True 
-            ).start() 
+            threading.Thread(
+                target=background_title_generation, 
+                args=(active_session_id, user_input), 
+                daemon=True
+            ).start()
 
         with st.chat_message("user"): 
             st.markdown(user_input) 
@@ -399,6 +486,10 @@ if user_input := st.chat_input("Bir soru sorun veya dosya oluşturmasını istey
 
                 latest_state = agent_executor.get_state(config) 
                 latest_messages = latest_state.values.get("messages", []) 
+                
+                # Mesajları hemen diske kaydet
+                save_messages_to_disk(active_session_id, latest_messages)
+
                 if latest_messages and isinstance(latest_messages[-1], AIMessage) and latest_messages[-1].content: 
                     st.markdown(latest_messages[-1].content) 
 
@@ -443,7 +534,7 @@ if col_files:
             session_folder = os.path.join(SESSION_PATH, active_session_id) 
              
             if os.path.exists(session_folder): 
-                all_files = sorted([f for f in os.listdir(session_folder) if f != "title.txt"]) 
+                all_files = sorted([f for f in os.listdir(session_folder) if f not in ["title.txt", "history.json"]]) 
                  
                 if all_files: 
                     st.caption(f"📁 Toplam **{len(all_files)}** dosya mevcut.") 
@@ -492,7 +583,6 @@ if col_files:
                         else: 
                             st.text_area("İçerik:", file_content, height=400) 
 
-                        # --- TAM EKRAN / DETAYLI İNCELEME MODALI --- 
                         @st.dialog(f"🔍 Dosya Detayı: {selected_file}", width="large") 
                         def open_file_modal(f_name, f_content, f_ext): 
                             st.caption(f"Tam ekran modunda inceleniyor: `{f_name}`") 
