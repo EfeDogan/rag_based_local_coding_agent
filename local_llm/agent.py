@@ -3,9 +3,6 @@ from langchain_core.tools import tool
 from uuid import uuid4 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, RemoveMessage
-#from langchain_core.callbacks import StreamingStdOutCallbackHandler
-#from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
-# LangGraph Persistence Import'u
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.agents import create_agent
 from langchain_ollama import ChatOllama
@@ -14,7 +11,7 @@ from qdrant_pipeline.qdrant_main import get_client
 from prompts.prompts2 import SYSTEM_PROMPT
 from token_tracker.base_callback_handler import TokenTrackerHandler
 from typing import Any
-#from tools.tools import tools
+
 
 
 load_dotenv()
