@@ -148,7 +148,7 @@ def create_file(response: Any,
         >>> create_file("Merhaba!")
         {'dosya_adi': 'cevap.txt', 'dosya_yolu': 'cevap.txt', 'durum': True}
     """
-    
+
     
     if file_name == None:
         dosya_adi = f"file_name"
@@ -269,7 +269,6 @@ while True:
         if query.strip() == "/compact":
                 contextmd_count=run_compaction(memory_text=memory_text, contextmd_count=contextmd_count, session_id=session_id)
                 memory_text=""
-
 
         else:
 
