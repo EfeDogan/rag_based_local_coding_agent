@@ -267,7 +267,7 @@ while True:
         
         query = input()
         if query.strip() == "/compact":
-                contextmd_count=run_compaction(memory_text=memory_text, contextmd_count=contextmd_count, session_id=session_id)
+                contextmd_count=run_compaction(memory_text=memory_text, session_id=session_id)
                 memory_text=""
 
         else:
@@ -309,7 +309,7 @@ while True:
         print(" > Başka merak ettiğiniz bir konu var mı?")
 
         if token_tracker.prompt_eval_count >= 60000:
-            contextmd_count=run_compaction(memory_text=memory_text, contextmd_count=contextmd_count, session_id=session_id)
+            contextmd_count=run_compaction(memory_text=memory_text, session_id=session_id)
             memory_text=""
     
     except KeyboardInterrupt:

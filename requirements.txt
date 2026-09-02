@@ -1,0 +1,21 @@
+# LangChain / LangGraph agent stack
+langchain>=1.0
+langchain-core>=1.0
+langchain-ollama>=1.0
+langgraph>=1.0
+
+# Vector database
+qdrant-client>=1.12
+
+# tree-sitter parsers (Java / Python / Go)
+tree-sitter>=0.24
+tree-sitter-java>=0.23
+tree-sitter-python>=0.23
+tree-sitter-go>=0.23
+
+# Web interface
+streamlit>=1.40
+
+# Misc
+python-dotenv>=1.0
+requests>=2.31
